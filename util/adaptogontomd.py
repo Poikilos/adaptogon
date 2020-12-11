@@ -744,7 +744,7 @@ class MDFromHTMLParser(HTMLParser):
         if top is not None:
             if top in MDFromHTMLParser.H_LEVELS:
                 i = MDFromHTMLParser.H_LEVELS.index(top)
-                before = "#"*i + " "
+                before = "\n\n" + "#"*i + " "
                 # ^ newline after the line is handled by endtag handler
 
         if self.isIn("blockquote"):
