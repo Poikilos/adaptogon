@@ -16,6 +16,11 @@ SELECT * INTO OUTFILE 'streetlightinfo-last-php-version.csv'
 3.
 quit;
 
+This program will only do as much about blank lines as it can without
+mangling the HTML (shoving words together). If there is HTML like
+`line. <br /> <br />Another line` you can expect the markdown to have
+3 blank lines in between the two, the middle having only a space,
+because that's what the HTML said to do.
 """
 import os
 csvNL = "SUPER_SAYAN_NEWLINE_HERE" # must be the same used in mysql dump
@@ -92,9 +97,11 @@ htmlRefI = 8
 TagsI = 9
 AttribI = 10
 parentNames = {}
-treePath = 'tree-md'
+treePath = os.path.join(dirPath, 'tree-md')
 if not os.path.isdir(treePath):
     os.makedirs(treePath)
+
+from html.parser import HTMLParser
 
 with open(dest, 'r') as read_obj:
     # pass the file object to reader() to get the reader object
@@ -163,10 +170,10 @@ def stripMore(htmlS):
         htmlS = htmlS[len(got):]
 
     htmlS = htmlS.strip()
+
     return htmlS
 
 
-from html.parser import HTMLParser
 
 
 class Tag:
@@ -216,6 +223,16 @@ class Tag:
                 # print("style property {}".format(styles[-1]))
         return styles
 
+    def get(self, attribName):
+        """
+        Get a plain html attribute.
+        """
+        name = attribName.lower()
+        for attrib, v in self.attrs:
+            if attrib.lower() == name:
+                return v
+        return None
+
     def hasStyle(self, name, value):
         """
         Sequential arguments:
@@ -256,39 +273,43 @@ class MDFromHTMLParser(HTMLParser):
         "tbody",
         "td",
     ]
-    FLAG_TAG_LT = "__MDFromHTMLParser_GT__"
-    FLAG_TAG_GT = "__MDFromHTMLParser_LT__"
+
+    FLAG_TAG_LT = "__ADAPTOGON_GT__"
+    FLAG_TAG_GT = "__ADAPTOGON_LT__"
+    FLAG_TAG_LB = "__ADAPTOGON_LB__"
+    FLAG_TAG_RB = "__ADAPTOGON_RB__"
+    FLAG_TAG_ST = "__ADAPTOGON_ST__"
+
+    FLAG_TAG_SBQ = "__ADAPTOGON_START_BLOCK_QUOTE_LINE__"
     # ^ convert to flags
-    KEEP_SPECIAL = {
-        "sup": ["__MDFromHTMLParser_CARET__", "^"],
-        "sub": ["__MDFromHTMLParser_TILDE__", "~"],
+
+    _KEEP_HTML = {
+        "sup": ["__ADAPTOGON_CARET__", "^"],
+        "sub": ["__ADAPTOGON_TILDE__", "~"],
     }
 
-    @staticmethod
-    def _insulate(self, tagWord):
-        LT = MDFromHTMLParser.FLAG_TAG_LT
-        GT = MDFromHTMLParser.FLAG_TAG_GT
-        return LT + tagWord + GT
 
-    def getMarkdown(self):
+    def __init__(self, enableSubSup=True, enableVuePress=True):
         """
-        Get markdown and tables and sup and sub
-        """
-        LT = MDFromHTMLParser.FLAG_TAG_LT
-        GT = MDFromHTMLParser.FLAG_TAG_GT
-        md = self._markdownAndFlags.replace(GT, ">")
-        md = self._markdownAndFlags.replace(LT, "<")
-        return md
 
-    def __init__(self):
-        """
+        Keyword arguments:
+        enableSubSup - Change <sup> and </sup> to ^, change <sub> and
+                       </sub> to ~ in accordance with markdown sub-sub
+                       for VuePress
         Set enableSubSup to False if you don't have an
         addon which changes ^2^ to squared and B~1~ to B sub 1.
         <https://vuepress-theme.mrhope.site/guide/feature/markdown/
         sup-sub/#configuration>
+
+        enableVuePress -- Change URLs without slashes that end in `.html` to `.md`.
+        Set enableVuePress to false if you don't want that.
         """
         super().__init__()
-        self.enableSubSup = True
+        self.wasB = False
+        self.wasI = False
+        self.wasST = False
+        self.enableSubSup = enableSubSup
+        self.enableVuePress = enableVuePress
         self._markdownAndFlags = ""
         self.path = None
         self.voids = [
@@ -303,9 +324,12 @@ class MDFromHTMLParser(HTMLParser):
         self.stack = []
         self.boldAt = -1
         self.iAt = -1
+        self.stAt = -1
         self.bTags = ['bold', 'b', 'strong']
         self.iTags = ['i', 'italic']
+        self.stTags = ['strike']
         self.olLiN = 1
+        self.lastUrl = None
         self.liSpaces = []
         self.poppedSpaces = True
 
@@ -328,6 +352,123 @@ class MDFromHTMLParser(HTMLParser):
             ("font-style", "italic"),
             ("font-style", "oblique"),
         ]
+        self.stStyles = [
+            ("text-decoration", "line-through"),
+        ]
+
+
+    @staticmethod
+    def _insulate(self, tagWord):
+        LT = MDFromHTMLParser.FLAG_TAG_LT
+        GT = MDFromHTMLParser.FLAG_TAG_GT
+        return LT + tagWord + GT
+
+
+    def keep(self):
+        keep = {}
+        lose = []
+        if not self.enableSubSup:
+            lose = ["sub", "sub"]
+        for k, v in MDFromHTMLParser._KEEP_HTML.items():
+            if k not in lose:
+                keep[k] = v
+        return keep
+
+
+    def keepFlag(self, k):
+        return self.keep()[k][0]
+
+
+    def keepHTML(self, k):
+        return self.keep()[k][1]
+
+
+    def getMarkdown(self):
+        """
+        Get markdown and tables and sup and sub
+        """
+        LT = MDFromHTMLParser.FLAG_TAG_LT
+        GT = MDFromHTMLParser.FLAG_TAG_GT
+        LB = MDFromHTMLParser.FLAG_TAG_LB
+        RB = MDFromHTMLParser.FLAG_TAG_RB
+        SBQ = MDFromHTMLParser.FLAG_TAG_SBQ
+        md = self._markdownAndFlags
+        """
+        # Make all LT and GT into literals before adding actual html:
+        lines = md.split("\n")
+        md = ""
+        for line in lines:
+            if not line.startswith("> "):
+                line = line.replace("<", "\\<")
+                line = line.replace(">", "\\>")
+            else:
+                line = (
+                    "> "
+                    + line[2:].replace("<", "\\<").replace(">", "\\>")
+                )
+            md += line + "\n"
+        # handle via SBQ instead:
+        """
+        replacements = {
+            "<": "\\<",
+            ">": "\\>",
+            "[": "\\[",
+            "]": "\\]",
+        }
+        replacements[SBQ + "\n" + SBQ] = ""
+        for old, new in replacements.items():
+            md = md.replace(old, new)
+
+        md = md.replace(SBQ, "> ")
+        md = md.replace(GT, ">")
+        md = md.replace(LT, "<")
+        md = md.replace(LB, "[")
+        md = md.replace(RB, "]")
+        # Re-add HTML parts AFTER making all LT and GT into literals:
+
+        for tagWord, vals in self.keep().items():
+            old, new = vals
+            md = md.replace(old, new)
+
+
+
+        redundantExplicitMDNLs = [
+            "\\\n\n",
+            "\n\n\\",
+            "\\\n\\\n",
+            "\\\\"
+        ]
+
+        # This is hacky but may work (repeat since only the collapsed
+        # version will match in some cases, it seems):
+        for badNL in redundantExplicitMDNLs:
+            while badNL in md:
+                for badNL2 in redundantExplicitMDNLs:
+                    while badNL2 in md:
+                        md = md.replace(badNL2, "\n\n")
+        for badNL in redundantExplicitMDNLs:
+            while badNL in md:
+                for badNL2 in redundantExplicitMDNLs:
+                    while badNL2 in md:
+                        md = md.replace(badNL2, "\n\n")
+
+        old = "\n\n\n"
+        new = "\n\n"
+        while old in md:
+            md = md.replace(old, new)
+        replacements = {
+            "\\\n# ": "\n\n# ",
+            "\\\n## ": "\n\n## ",
+            "\\\n### ": "\n\n### ",
+            "\\\n#### ": "\n\n#### ",
+            "\\\n##### ": "\n\n##### ",
+            "\\\n###### ": "\n\n###### ",
+        }
+        for old, new in replacements.items():
+            md = md.replace(old, new)
+
+        return md
+
 
     def push(self, tagWord, attrs):
         """
@@ -335,6 +476,7 @@ class MDFromHTMLParser(HTMLParser):
         """
         if tagWord.lower() not in self.voids:
             self.stack.append(Tag(tagWord, attrs))
+
 
     def isIn(self, tagWord, orStyles=None, depth=None):
         """
@@ -348,6 +490,7 @@ class MDFromHTMLParser(HTMLParser):
         depth -- the count of stack items to check (1 for top tag only)
         """
         tagWords = [tagWord]
+
         if hasattr(tagWord, 'append'):
             tagWords = tagWord
         stack = self.stack
@@ -369,6 +512,7 @@ class MDFromHTMLParser(HTMLParser):
                         print("orStyle: {}".format(orStyle))
                         raise ex
         return False
+
 
     def pop(self, tagWord):
         if len(self.stack) < 1:
@@ -398,6 +542,8 @@ class MDFromHTMLParser(HTMLParser):
 
     def handle_starttag(self, tagWord, attrs):
         tw = tagWord.lower()
+        LB = MDFromHTMLParser.FLAG_TAG_LB
+        ST = MDFromHTMLParser.FLAG_TAG_ST
         if tw == "ol":
             self.olLiN = 1
         topWord = None
@@ -414,43 +560,56 @@ class MDFromHTMLParser(HTMLParser):
             newSpaces = " " * (len(new)-1)  # -1 for newline
             self.liSpaces.append(newSpaces)
             self.poppedSpaces = False
+        newTag = Tag(tagWord, attrs)
         self.push(tagWord, attrs)  # only pushes not a void tag
         if (tw == "code") and not self.isIn("pre"):
             self._markdownAndFlags += "\n```\n"
         elif (tw == "pre") and not self.isIn("code"):
             self._markdownAndFlags += "\n```\n"
+        elif tw == "a":
+            self.lastUrl = newTag.get("href")
+            if self.lastUrl is not None:
+                self._markdownAndFlags += LB
 
-        got = KEEP_SPECIAL.get(tw)
+        got = self.keep().get(tw)
         if got is not None:
             FLAG, REAL = got
             self._markdownAndFlags += FLAG
 
+        """
         if self.isIn(self.bTags, orStyles=self.boldStyles, depth=1):
             self._markdownAndFlags += '**'
             self.bAt = len(self.stack)
         elif self.isIn(self.iTags, orStyles=self.emStyles, depth=1):
             self._markdownAndFlags += '_'
             self.iAt = len(self.stack)
-        elif tw == "br":
+        elif self.isIn(self.stTags, orStyles=self.stStyles, depth=1):
+            self._markdownAndFlags += ST
+            self.stAt = len(self.stack)
+        """
+        if tw == "br":
             self._markdownAndFlags += MDFromHTMLParser.MD_NEWLINE + "\n"
         LT = MDFromHTMLParser.FLAG_TAG_LT
         GT = MDFromHTMLParser.FLAG_TAG_GT
 
-        if tw in self.keepTags:
+        if tw in MDFromHTMLParser.FLAG_TAGS:
             self._markdownAndFlags += LT + "{}".format(tw) + GT
+
 
     def handle_endtag(self, tagWord):
         tw = tagWord.lower()
         LT = MDFromHTMLParser.FLAG_TAG_LT
         GT = MDFromHTMLParser.FLAG_TAG_GT
+        LB = MDFromHTMLParser.FLAG_TAG_RB
+        RB = MDFromHTMLParser.FLAG_TAG_RB
+        ST = MDFromHTMLParser.FLAG_TAG_ST
 
-
-        got = KEEP_SPECIAL.get(tw)
+        got = self.keep().get(tw)
         if got is not None:
             FLAG, REAL = got
             self._markdownAndFlags += FLAG
 
-        if tw in self.keepTags:
+        if tw in MDFromHTMLParser.FLAG_TAGS:
             self._markdownAndFlags += LT + "/{}".format(tw) + GT
         elif tw == "li":
             if len(self.liSpaces) < 1:
@@ -472,44 +631,118 @@ class MDFromHTMLParser(HTMLParser):
             self._markdownAndFlags += "\n```\n"
         elif (tw == "pre") and not self.isIn("code"):
             self._markdownAndFlags += "\n```\n"
-        elif self.isIn(self.bTags, orStyles=self.boldStyles, depth=1):
+        elif tw == "a":
+            if self.lastUrl != None:
+                self._markdownAndFlags += RB
+                url = self.lastUrl
+                if not "/" in url:
+                    # adaptogon-specific--index.php serves all files
+                    # so anything without slashes is internal.
+                    if self.enableVuePress:
+                        badExt = ".html"
+                        if url.endswith(badExt):
+                            url = url[:-len(badExt)] + ".md"
+                self._markdownAndFlags += "({})".format(url)
+
+        """
+        if self.isIn(self.bTags, orStyles=self.boldStyles, depth=1):
             self._markdownAndFlags += '**'
             self.bAt = len(self.stack)
         elif self.isIn(self.iTags, orStyles=self.emStyles, depth=1):
             self._markdownAndFlags += '_'
             self.iAt = len(self.stack)
-
+            print("END OF {} after {}".format("italics (any)", self.debugPrevData))
+        elif self.isIn(self.bTags, orStyles=self.stStyles, depth=1):
+            self._markdownAndFlags += ST
+            self.bAt = len(self.stack)
+        """
         if tw in MDFromHTMLParser.H_LEVELS:
+            # print("END OF {} after {}".format(tw, self.debugPrevData))
             self._markdownAndFlags += "\n"
 
+
     def handle_data(self, data):
-        data = data.strip()
+        # Mimic html behavior where each whitespace area is one space:
+        data = data.replace ("\n", " ")
+        data = data.replace ("\r", " ")
+        data = data.replace ("\t", " ")
+        while "  " in data:
+            data = data.replace("  ", " ")
+        if data == data.strip():
+            data = data.strip()
+            # ^ allow later cleanup to detect multiple newlines
+
         indent = "".join(self.liSpaces)
-        if self.isIn("li"):
-            data = indent + data.replace("\n", "\n" + indent)
-        if self.isIn("blockquote"):
-            data = "\n> " + data.replace("\n", "\n> ")
+        ST = MDFromHTMLParser.FLAG_TAG_ST
+        SBQ = MDFromHTMLParser.FLAG_TAG_SBQ
+        # if self.isIn("li"):
+        # #   data = indent + data.replace("\n", "\n" + indent)
+        # TODO:? ^
+        top = None
+        if len(self.stack) > 0:
+            top = self.stack[-1]
+
         top = None
         if len(self.stack) > 0:
             top = self.stack[-1].tw()
         before = ""
+        after = ""
+
+        data = data.replace("*", "\\*")
+        data = data.replace("_", "\\_")
+
+        if self.isIn(self.bTags, orStyles=self.boldStyles, depth=1):
+            before += '**'
+            after = '**' + after
+            if self.wasB or self.wasI or self.wasST:
+                before = " " + before
+                # ^ try to prevent broken markdown from multiple marks
+            # self._markdownAndFlags += '**'
+            # self.bAt = len(self.stack)
+            self.wasB = True
+            self.wasI = False
+            self.wasST = False
+        elif self.isIn(self.iTags, orStyles=self.emStyles, depth=1):
+            before += '_'
+            after = '_' + after
+            # self._markdownAndFlags += '_'
+            # self.iAt = len(self.stack)
+            self.wasB = False
+            self.wasI = True
+            self.wasST = False
+        elif self.isIn(self.stTags, orStyles=self.stStyles, depth=1):
+            before += ST
+            after = ST + after
+            # self._markdownAndFlags += ST
+            # self.stAt = len(self.stack)
+            self.wasB = False
+            self.wasI = False
+            self.wasST = True
+
         if top is not None:
             if top in MDFromHTMLParser.H_LEVELS:
                 i = MDFromHTMLParser.H_LEVELS.index(top)
                 before = "#"*i + " "
                 # ^ newline after the line is handled by endtag handler
-        data = data.replace("*", "\\*")
-        data = data.replace("_", "\\_")
-        # if self.isIn(['bold','b','strong'], orStyles=self.boldStyles):
+
+        if self.isIn("blockquote"):
+            if top == "blockquote":
+                data = SBQ + data
+            data = data.replace("\n", "\n" + SBQ)
+
+        # if self.isIn(bTags, orStyles=self.boldStyles):
         # #   data = '**{}**'.format(data)
-        # if self.isIn(['i', 'italic'], orStyles=self.emStyles):
+        # if self.isIn(iTags, orStyles=self.emStyles):
+        # #   data = '_{}_'.format(data)
+        # if self.isIn(stTags, orStyles=self.stStyles):
         # #   data = '_{}_'.format(data)
         # data = MDFromHTMLParser.stripLineByLine(data)
         # ^ stripLineByLine BREAKS ABOVE WORK, don't do it.
         if len(data) > 0:
             self.debugPrevPrevData = self.debugPrevData
             self.debugPrevData = data
-            self._markdownAndFlags += before + data
+            self._markdownAndFlags += before + data + after
+
 
     @staticmethod
     def stripLineByLine(htmlS):
@@ -538,48 +771,10 @@ def toMarkdown(htmlS, tb=None):
             "".format(parser.stack, tb, parser.debugPrevData,
                       parser.stack)
         )
-    htmlS = parser._markdownAndFlags
-    redundantExplicitMDNLs = ["\\\n\n", "\n\n\\", "\\\n\\\n", "\\\\"]
-
-    # This is hacky but may work (repeat since only the collapsed
-    # version will match in some cases, it seems):
-    for badNL in redundantExplicitMDNLs:
-        while badNL in htmlS:
-            for badNL2 in redundantExplicitMDNLs:
-                while badNL2 in htmlS:
-                    htmlS = htmlS.replace(badNL2, "\n\n")
-    for badNL in redundantExplicitMDNLs:
-        while badNL in htmlS:
-            for badNL2 in redundantExplicitMDNLs:
-                while badNL2 in htmlS:
-                    htmlS = htmlS.replace(badNL2, "\n\n")
-
-    old = "\n\n\n"
-    new = "\n\n"
-    while old in htmlS:
-        htmlS = htmlS.replace(old, new)
-    replacements = {
-        "\\\n# ": "\n\n# ",
-        "\\\n## ": "\n\n## ",
-        "\\\n### ": "\n\n### ",
-        "\\\n#### ": "\n\n#### ",
-        "\\\n##### ": "\n\n##### ",
-        "\\\n###### ": "\n\n###### ",
-    }
-    for old, new in replacements.items():
-        htmlS = htmlS.replace(old, new)
-
-
-
-
-
+    htmlS = parser.getMarkdown()
     return htmlS
-
-
-
-
-
-    # raise NotImplementedError("comment this line")
+    """
+    # DEPRECATED:
     void = "link"  # random void (self-terminating) tag
     htmlS = htmlS.replace("_", "\\_")
     htmlS = htmlS.replace("*", "\\*")
@@ -769,6 +964,7 @@ def toMarkdown(htmlS, tb=None):
         if bad in htmlS:
             print("  - WARNING: contains {}".format(bad))
     return htmlS
+    """
 
 
 def lessHTML(htmlS, removeMore=[]):
@@ -867,6 +1063,8 @@ with open(dest, 'r') as read_obj:
 
             heading = toMarkdown(row[shortNameI])
             tagline = toMarkdown(row[headingAndTaglineI])
+            heading = heading.replace("**", "")
+            tagline = tagline.replace("**", "")
 
             heading, tagline = splitMDSubtitle(
                 heading,
@@ -874,10 +1072,15 @@ with open(dest, 'r') as read_obj:
             )
             tagline = tagline.strip()
             heading = heading.strip()
-            if (len(tagline) > 0) and (tagline != heading):
+            outs.write("# " + heading + "\n")
+            if (len(tagline) > 0) and (tagline.lower() != heading.lower()):
                 tagline = tagline.replace("**", "")
                 tagline = tagline.replace("_", "")
                 tagline = "_{}_".format(tagline)
+                # print("* Tagline \"{}\" is not heading \"{}\""
+                # #     ".".format(tagline, heading))
+                outs.write(tagline + "\n\n")
+
             """
             # Splitting this way breaks the html, such as if a tag
             # starts in one part and ends in the next.
@@ -889,11 +1092,11 @@ with open(dest, 'r') as read_obj:
             tagline = toMarkdown(lessHTML(tagline), tb=subSubPath)
             heading = lessHTML(heading)
             tagline = lessHTML(tagline)
-            """
-
             outs.write("# " + heading + "\n")
             if heading != tagline:
                 outs.write(tagline + "\n\n")
+            """
+
             body = row[bodyI]
             # body = lessHTML(toMarkdown(body, tb=subSubPath))
             body = toMarkdown(body, tb=subSubPath)
@@ -916,19 +1119,31 @@ with open(dest, 'r') as read_obj:
         # ^ discard most of them and instead combine them:
 
         LeftText = stripMore(row[LeftTextI])
+        # print("* LeftText was {}".format(row[LeftTextI]))
         if len(LeftText) > 1:  # > on purpose
             extraPath = os.path.join(treePath, "LeftText.md")
+            isSideThere = os.path.isfile(extraPath)
             with open(extraPath, 'w') as extraOuts:
                 extraOuts.write(LeftText)
+            if isSideThere:
+                print("* LeftText OVERWROTE {}".format(extraPath))
+            else:
+                print("* LeftText saved to {}".format(extraPath))
 
+        # print("* RightText was {}".format(row[RightTextI]))
         RightText = stripMore(row[RightTextI]);
         if len(RightText) > 1:  # > on purpose
             extraPath = os.path.join(treePath, "RightText.md")
+            isSideThere = os.path.isfile(extraPath)
             with open(extraPath, 'w') as extraOuts:
                 extraOuts.write(RightText)
+            if isSideThere:
+                print("* RightText OVERWROTE {}".format(extraPath))
+            else:
+                print("* RightText saved to {}".format(extraPath))
 
 
-treePath = "tree-html"
+treePath = os.path.join(dirPath, "tree-html")
 if not os.path.isdir(treePath):
     os.makedirs(treePath)
 with open(dest, 'r') as read_obj:
