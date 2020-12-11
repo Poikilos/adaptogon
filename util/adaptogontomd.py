@@ -289,25 +289,27 @@ class MDFromHTMLParser(HTMLParser):
     }
 
 
-    def __init__(self, enableSubSup=True, enableVuePress=True):
+    def __init__(self, enableSubSup=True, enableVuePress=True, tb=None):
         """
 
         Keyword arguments:
-        enableSubSup - Change <sup> and </sup> to ^, change <sub> and
-                       </sub> to ~ in accordance with markdown sub-sub
-                       for VuePress
-        Set enableSubSup to False if you don't have an
-        addon which changes ^2^ to squared and B~1~ to B sub 1.
-        <https://vuepress-theme.mrhope.site/guide/feature/markdown/
-        sup-sub/#configuration>
-
-        enableVuePress -- Change URLs without slashes that end in `.html` to `.md`.
-        Set enableVuePress to false if you don't want that.
+        enableSubSup -- Change <sup> and </sup> to ^, change <sub> and
+                        </sub> to ~ in accordance with markdown sub-sub
+                        for VuePress. Set enableSubSup to False if you
+                        don't have an addon which changes ^2^ to
+                        squared and B~1~ to B sub 1.
+                        <https://vuepress-theme.mrhope.site/guide/
+                        feature/markdown/sup-sub/#configuration>
+        enableVuePress -- Change URLs without slashes that end in
+                          `.html` to `.md`. Set enableVuePress to false
+                          if you don't want that.
+        tb -- a file that produced the HTML, for tracing
         """
         super().__init__()
         self.wasB = False
         self.wasI = False
         self.wasST = False
+        self.tb = tb
         self.enableSubSup = enableSubSup
         self.enableVuePress = enableVuePress
         self._markdownAndFlags = ""
@@ -436,7 +438,11 @@ class MDFromHTMLParser(HTMLParser):
             "\\\n\n",
             "\n\n\\",
             "\\\n\\\n",
-            "\\\\"
+            "\\\\",
+            "\\\n \\",
+            "\\\n  \\",
+            "\n \\\n",
+            "\n\\\n",
         ]
 
         # This is hacky but may work (repeat since only the collapsed
@@ -544,6 +550,8 @@ class MDFromHTMLParser(HTMLParser):
         tw = tagWord.lower()
         LB = MDFromHTMLParser.FLAG_TAG_LB
         ST = MDFromHTMLParser.FLAG_TAG_ST
+        LB = MDFromHTMLParser.FLAG_TAG_LB
+        RB = MDFromHTMLParser.FLAG_TAG_RB
         if tw == "ol":
             self.olLiN = 1
         topWord = None
@@ -566,6 +574,20 @@ class MDFromHTMLParser(HTMLParser):
             self._markdownAndFlags += "\n```\n"
         elif (tw == "pre") and not self.isIn("code"):
             self._markdownAndFlags += "\n```\n"
+        elif tw == "img":
+            alt = newTag.get("alt")
+            src = newTag.get("src")
+            if src is None:
+                print("WARNING: img has no src in file {}".format(tb))
+            else:
+                if alt is None:
+                    alt = src
+                self._markdownAndFlags += "!{}{}{}({})".format(
+                    LB,
+                    alt,
+                    RB,
+                    src,
+                )
         elif tw == "a":
             self.lastUrl = newTag.get("href")
             if self.lastUrl is not None:
@@ -759,7 +781,7 @@ def toMarkdown(htmlS, tb=None):
     Keyword arguments:
     tb -- The file that originated the content, for error-tracing
     """
-    parser = MDFromHTMLParser()
+    parser = MDFromHTMLParser(tb=tb)
     parser.path = tb
     parser.feed(htmlS)
     # ^ feed is synchronous
