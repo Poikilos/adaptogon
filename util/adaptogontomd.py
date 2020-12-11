@@ -347,8 +347,8 @@ class MDFromHTMLParser(HTMLParser):
             #   Can be a number (not only bold or bolder)
             #   ...where 400 is normal!
             #   - Other less than bold weights: normal, lighter
-            #   - Other values to ignore (For _markdownAndFlags, who cares--leave
-            #     it normal): inherit, initial
+            #   - Other values to ignore (For _markdownAndFlags, who
+            #     cares--leave it normal): inherit, initial
         ]
         self.emStyles = [
             ("font-style", "italic"),
@@ -357,7 +357,6 @@ class MDFromHTMLParser(HTMLParser):
         self.stStyles = [
             ("text-decoration", "line-through"),
         ]
-
 
     @staticmethod
     def _insulate(self, tagWord):
@@ -554,6 +553,10 @@ class MDFromHTMLParser(HTMLParser):
         RB = MDFromHTMLParser.FLAG_TAG_RB
         if tw == "ol":
             self.olLiN = 1
+
+        if tw in MDFromHTMLParser.COMPLEX_NEWLINES:
+            self._markdownAndFlags += "\n\n"
+
         topWord = None
         if len(self.stack) > 0:
             topWord = self.stack[-1]
@@ -693,7 +696,6 @@ class MDFromHTMLParser(HTMLParser):
         if data == data.strip():
             data = data.strip()
             # ^ allow later cleanup to detect multiple newlines
-
         indent = "".join(self.liSpaces)
         ST = MDFromHTMLParser.FLAG_TAG_ST
         SBQ = MDFromHTMLParser.FLAG_TAG_SBQ
