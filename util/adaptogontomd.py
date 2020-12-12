@@ -279,7 +279,6 @@ class MDFromHTMLParser(HTMLParser):
     FLAG_TAG_LB = "__ADAPTOGON_LB__"
     FLAG_TAG_RB = "__ADAPTOGON_RB__"
     FLAG_TAG_ST = "__ADAPTOGON_ST__"
-
     FLAG_TAG_SBQ = "__ADAPTOGON_START_BLOCK_QUOTE_LINE__"
     # ^ convert to flags
 
@@ -288,6 +287,22 @@ class MDFromHTMLParser(HTMLParser):
         "sub": ["__ADAPTOGON_TILDE__", "~"],
     }
 
+    FLAGS = [
+        FLAG_TAG_LT,
+        FLAG_TAG_GT,
+        FLAG_TAG_LB,
+        FLAG_TAG_RB,
+        FLAG_TAG_ST,
+        FLAG_TAG_SBQ,
+        "__ADAPTOGON_CARET__",
+        "__ADAPTOGON_TILDE__",
+    ]
+
+    def endswithAny(s, needles):
+        for needle in needles:
+            if s.endswith(needle):
+                return True
+        return False
 
     def __init__(self, enableSubSup=True, enableVuePress=True, tb=None):
         """
@@ -328,7 +343,7 @@ class MDFromHTMLParser(HTMLParser):
         self.iAt = -1
         self.stAt = -1
         self.bTags = ['bold', 'b', 'strong']
-        self.iTags = ['i', 'italic']
+        self.iTags = ['i', 'italic', 'em']
         self.stTags = ['strike']
         self.olLiN = 1
         self.lastUrl = None
@@ -416,22 +431,28 @@ class MDFromHTMLParser(HTMLParser):
             "[": "\\[",
             "]": "\\]",
         }
+
         replacements[SBQ + "\n" + SBQ] = ""
         for old, new in replacements.items():
             md = md.replace(old, new)
 
-        md = md.replace(SBQ, "> ")
+        md = md.replace(SBQ, "\n> ")
         md = md.replace(GT, ">")
         md = md.replace(LT, "<")
         md = md.replace(LB, "[")
         md = md.replace(RB, "]")
+
         # Re-add HTML parts AFTER making all LT and GT into literals:
 
         for tagWord, vals in self.keep().items():
             old, new = vals
             md = md.replace(old, new)
 
-
+        # md = md.replace( 0x\C2 0x\A0, " ")  # TODO
+        #C2AO is Hex UTF-8 bytes BOM!
+        md = md.replace(str(0xC2), " ") # A with caret, part of BOM
+        md = md.replace(str(0xA0), " ")
+        # A0 is NBSP!
 
         redundantExplicitMDNLs = [
             "\\\n\n",
@@ -442,6 +463,9 @@ class MDFromHTMLParser(HTMLParser):
             "\\\n  \\",
             "\n \\\n",
             "\n\\\n",
+            "\n   \n",
+            "\n  \n",
+            "\n \n",
         ]
 
         # This is hacky but may work (repeat since only the collapsed
@@ -583,7 +607,7 @@ class MDFromHTMLParser(HTMLParser):
             if src is None:
                 print("WARNING: img has no src in file {}".format(tb))
             else:
-                if alt is None:
+                if (alt is None) or (alt.strip() == ""):
                     alt = src
                 self._markdownAndFlags += "!{}{}{}({})".format(
                     LB,
@@ -620,6 +644,20 @@ class MDFromHTMLParser(HTMLParser):
         if tw in MDFromHTMLParser.FLAG_TAGS:
             self._markdownAndFlags += LT + "{}".format(tw) + GT
 
+    @staticmethod
+    def cleanSpaces(s):
+        """
+        Try to remove bad whitespace (only keep " " and "\n"--convert
+        the rest to " ").
+        """
+        ret = ""
+        if s is not None:
+            for c in s:
+                if (c != "\n") and (c.strip() != c):
+                    ret += " "
+                else:
+                    ret += c
+        return ret
 
     def handle_endtag(self, tagWord):
         tw = tagWord.lower()
@@ -644,7 +682,7 @@ class MDFromHTMLParser(HTMLParser):
                 del self.liSpaces[-1]
             self.poppedSpaces = True
         if tw == "br":
-            # ^ Why does this happen in handle_endtag??
+            # ^ Why does this happen in handle_endtag?? Maybe <br/>
             self._markdownAndFlags += MDFromHTMLParser.MD_NEWLINE + "\n"
         else:
             self.pop(tw)
@@ -658,6 +696,8 @@ class MDFromHTMLParser(HTMLParser):
             self._markdownAndFlags += "\n```\n"
         elif tw == "a":
             if self.lastUrl != None:
+                if self._markdownAndFlags.endswith("\n"):
+                    self._markdownAndFlags = self._markdownAndFlags[:-1]
                 self._markdownAndFlags += RB
                 url = self.lastUrl
                 if not "/" in url:
@@ -688,9 +728,10 @@ class MDFromHTMLParser(HTMLParser):
 
     def handle_data(self, data):
         # Mimic html behavior where each whitespace area is one space:
-        data = data.replace ("\n", " ")
-        data = data.replace ("\r", " ")
-        data = data.replace ("\t", " ")
+        data = MDFromHTMLParser.cleanSpaces(data)
+        # data = data.replace ("\n", " ")
+        # data = data.replace ("\r", " ")
+        # data = data.replace ("\t", " ")
         while "  " in data:
             data = data.replace("  ", " ")
         if data == data.strip():
@@ -716,11 +757,12 @@ class MDFromHTMLParser(HTMLParser):
         data = data.replace("_", "\\_")
 
         if self.isIn(self.bTags, orStyles=self.boldStyles, depth=1):
-            before += '**'
-            after = '**' + after
+            before += ' **'
+            after = '** ' + after
             if self.wasB or self.wasI or self.wasST:
-                before = " " + before
+                # before = " " + before
                 # ^ try to prevent broken markdown from multiple marks
+                pass
             # self._markdownAndFlags += '**'
             # self.bAt = len(self.stack)
             self.wasB = True
@@ -729,6 +771,10 @@ class MDFromHTMLParser(HTMLParser):
         elif self.isIn(self.iTags, orStyles=self.emStyles, depth=1):
             before += '_'
             after = '_' + after
+            if self.wasB or self.wasI or self.wasST:
+                # before = " " + before
+                # ^ try to prevent broken markdown from multiple marks
+                pass
             # self._markdownAndFlags += '_'
             # self.iAt = len(self.stack)
             self.wasB = False
@@ -739,9 +785,18 @@ class MDFromHTMLParser(HTMLParser):
             after = ST + after
             # self._markdownAndFlags += ST
             # self.stAt = len(self.stack)
+            if self.wasB or self.wasI or self.wasST:
+                # before = " " + before
+                # ^ try to prevent broken markdown from multiple marks
+                pass
             self.wasB = False
             self.wasI = False
             self.wasST = True
+        else:
+            self.wasB = False
+            self.wasI = False
+            self.wasST = False
+
 
         if top is not None:
             if top in MDFromHTMLParser.H_LEVELS:
@@ -749,10 +804,6 @@ class MDFromHTMLParser(HTMLParser):
                 before = "\n\n" + "#"*i + " "
                 # ^ newline after the line is handled by endtag handler
 
-        if self.isIn("blockquote"):
-            if top == "blockquote":
-                data = SBQ + data
-            data = data.replace("\n", "\n" + SBQ)
 
         # if self.isIn(bTags, orStyles=self.boldStyles):
         # #   data = '**{}**'.format(data)
@@ -765,7 +816,30 @@ class MDFromHTMLParser(HTMLParser):
         if len(data) > 0:
             self.debugPrevPrevData = self.debugPrevData
             self.debugPrevData = data
-            self._markdownAndFlags += before + data + after
+            if len(before) > 0:
+                if self._markdownAndFlags.endswith(before):
+                    if not MDFromHTMLParser.endswithAny(
+                                self._markdownAndFlags,
+                                MDFromHTMLParser.FLAGS,
+                            ):
+                        self._markdownAndFlags = self._markdownAndFlags[:-len(before)]
+                        print("* REMOVING EXTRA stop-start in style: {}"
+                              "".format(before + before))
+                        before = ""
+                        # ^ cancel silly things like </em><em> that break this
+                        #   algorithm
+            if len(before) > 0:
+                if not data[-1:] == " ":
+                    before = " " + before
+                    # ^ won't work if no space is before it (The ending
+                    #   one doesn't need space to end styling though)
+            data = before + data + after
+            if self.isIn("blockquote"):
+                if top == "blockquote":
+                    data = "\n" + SBQ + data
+                data = data.replace("\n", "\n" + SBQ)
+
+            self._markdownAndFlags += data
 
 
     @staticmethod
